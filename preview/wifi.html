@@ -1,0 +1,159 @@
+
+<!DOCTYPE html><html lang="uk"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wi-Fi · Huawei R4850G2</title>
+<style>
+:root{--bg:#0f1216;--card:#171b21;--line:#262c35;--txt:#e6e9ee;--mut:#8a93a1;--acc:#4ea1ff;--ok:#38c172;--bad:#ef5350}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+header h1{font-size:17px;margin:0;font-weight:600}header .sp{flex:1}
+main{max-width:520px;margin:0 auto;padding:16px;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:600}
+.mini{font-size:12px;color:var(--mut)}
+input{width:100%;background:#20262e;border:1px solid var(--line);color:var(--txt);border-radius:7px;padding:9px 11px;font:inherit;margin-bottom:10px}
+button{font:inherit;color:var(--txt);background:#20262e;border:1px solid var(--line);border-radius:7px;padding:10px 14px;cursor:pointer;font-weight:600}
+button:hover{border-color:#3a4350}
+.pri{background:var(--acc);border-color:var(--acc);color:#04121f;width:100%}
+.dan{background:transparent;border-color:#5a2a2a;color:#ff8a80;width:100%;margin-top:8px}
+.lang{width:auto;padding:4px 10px;font-size:12px;font-weight:400;margin:0}
+.net{display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
+.net:last-child{border-bottom:none}.net:hover{color:var(--acc)}
+.rowh{display:flex;gap:8px}.rowh #mt{width:96px}
+#msg{margin-top:4px;font-size:13px}
+a{color:var(--mut)}
+</style></head><body>
+<!-- ===== PREVIEW SHIM wifi (fetch mock; джерело: wifi_html.h) ===== -->
+<style>
+#__pv{position:sticky;top:0;z-index:9999;background:#111;color:#eee;font:13px system-ui,sans-serif;padding:8px 12px;border-bottom:1px solid #333;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#__pv b{color:#f59e0b;margin-right:4px}#__pv .s{opacity:.7;margin-right:4px}
+#__pv button{background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:5px 10px;cursor:pointer;font:13px system-ui,sans-serif}
+#__pv button.on{background:#3b82f6;border-color:#3b82f6}
+</style>
+<div id="__pv"><b>PREVIEW</b><span class="s">mock-дані (сканування фейкове) · режим:</span></div>
+<script>
+(function(){
+  var scenario='sta';
+  var scn=[['sta','Підключено (STA)'],['ap','Точка доступу (AP)']];
+  function scanData(){
+    var ap=(scenario==='ap');
+    return { ap:ap, stored:!ap, scanning:false,
+      cur: ap ? '' : 'MyHomeWiFi_5G',
+      mh:'192.168.0.198', mt:1883, mu:'mqtt_user',
+      nets:[ {ssid:'MyHomeWiFi_5G',rssi:-48,enc:true},
+             {ssid:'MyHomeWiFi',rssi:-53,enc:true},
+             {ssid:'Office-Guest',rssi:-67,enc:false},
+             {ssid:'Neighbor_2.4',rssi:-74,enc:true},
+             {ssid:'Starlink',rssi:-82,enc:true} ] };
+  }
+  function resp(obj){ return Promise.resolve({ ok:true, status:200,
+    json:function(){return Promise.resolve(obj);},
+    text:function(){return Promise.resolve(JSON.stringify(obj));} }); }
+  var of=window.fetch;
+  window.fetch=function(url,opts){ url=String(url);
+    if(url.indexOf('/wifi/scan')>=0)   return resp(scanData());
+    if(url.indexOf('/wifi/save')>=0)   return resp({ok:true});
+    if(url.indexOf('/wifi/forget')>=0) return resp({ok:true});
+    return of?of.apply(this,arguments):resp({}); };
+  function mk(){ var bar=document.getElementById('__pv'); if(!bar) return;
+    scn.forEach(function(p){ var b=document.createElement('button'); b.textContent=p[1];
+      if(p[0]===scenario) b.className='on';
+      b.onclick=function(){ scenario=p[0];
+        Array.prototype.forEach.call(bar.querySelectorAll('button'),function(x){x.className='';});
+        b.className='on'; try{ if(window.scan) window.scan(); }catch(e){} };
+      bar.appendChild(b); }); }
+  if(document.readyState!=='loading') mk(); else document.addEventListener('DOMContentLoaded',mk);
+})();
+</script>
+<!-- ===== /PREVIEW SHIM wifi ===== -->
+
+<header><h1>Wi-Fi · R4850G2</h1><span class="sp"></span><button class="lang" id="langBtn" onclick="toggleLang()">EN</button></header>
+<main>
+
+<div class="card">
+  <h2 data-i="nets">Доступні мережі</h2>
+  <div id="list" class="mini" data-i="scanning">Пошук мереж…</div>
+</div>
+
+<div class="card">
+  <h2 data-i="conn">Підключення</h2>
+  <div id="cur" class="mini" style="margin-bottom:10px"></div>
+  <input id="ssid" maxlength="32" autocomplete="off" autocapitalize="off" data-ph="ssid">
+  <input id="pass" type="password" maxlength="63" autocomplete="off" data-ph="pass">
+  <button class="pri" id="saveBtn" data-i="save" onclick="save()">Зберегти й перезавантажити</button>
+  <button class="dan" id="forgetBtn" data-i="forget" style="display:none" onclick="forget()">Забути збережену мережу</button>
+  <div id="msg"></div>
+</div>
+
+<div class="card">
+  <h2>MQTT</h2>
+  <div class="rowh">
+    <input id="mh" maxlength="64" autocomplete="off" autocapitalize="off" data-ph="mh" style="flex:1">
+    <input id="mt" type="number" min="1" max="65535" value="1883">
+  </div>
+  <input id="mu" maxlength="64" autocomplete="off" autocapitalize="off" data-ph="mu">
+  <input id="mp" type="password" maxlength="64" autocomplete="off" data-ph="mp">
+  <div class="mini" data-i="mqtt_note">Зберігається кнопкою вище разом із Wi-Fi.</div>
+</div>
+
+<div class="mini" style="text-align:center"><a href="/dashboard" data-i="dash">Дашборд</a></div>
+
+</main>
+<script>
+const I18N={
+ uk:{nets:'Доступні мережі',scanning:'Пошук мереж…',none:'Мереж не знайдено',conn:'Підключення',save:'Зберегти й перезавантажити',forget:'Забути збережену мережу',dash:'Дашборд',
+  ssid:'Назва мережі (SSID)',mh:'MQTT хост (порожній = вимкнено)',mu:'MQTT логін (порожній = анонімно)',mp:'MQTT пароль (порожній = лишити старий)',mqtt_note:'Зберігається кнопкою вище разом із Wi-Fi.',e_mqtt:'MQTT: поля до 64 символів',e_port:'MQTT: порт 1–65535',pass:'Пароль (порожній для відкритої мережі)',cur:'Поточна мережа',ap:'Режим точки доступу — підключення до роутера немає',
+  saved:'Збережено. Пристрій перезавантажується — підключіться до своєї мережі й відкрийте http://huawei-r4850.local або IP з роутера.',
+  e_ssid:'Назва мережі має бути 1–32 символи',e_pass:'Пароль має бути 8–63 символи (або порожній)',e_net:'Помилка зв\'язку',
+  confirm:'Забути збережену мережу й перезавантажитись у режим налаштування?'},
+ en:{nets:'Available networks',scanning:'Scanning…',none:'No networks found',conn:'Connection',save:'Save and reboot',forget:'Forget saved network',dash:'Dashboard',
+  ssid:'Network name (SSID)',mh:'MQTT host (empty = disabled)',mu:'MQTT username (empty = anonymous)',mp:'MQTT password (empty = keep current)',mqtt_note:'Saved together with Wi-Fi by the button above.',e_mqtt:'MQTT: fields up to 64 characters',e_port:'MQTT: port 1–65535',pass:'Password (empty for open network)',cur:'Current network',ap:'Access point mode — not connected to a router',
+  saved:'Saved. The device is rebooting — join your network and open http://huawei-r4850.local or the IP from your router.',
+  e_ssid:'SSID must be 1–32 characters',e_pass:'Password must be 8–63 characters (or empty)',e_net:'Connection error',
+  confirm:'Forget the saved network and reboot into setup mode?'}
+};
+let lang='uk',info={},nets=null;
+try{lang=localStorage.getItem('lang')||((navigator.language||'uk').toLowerCase().startsWith('uk')?'uk':'en')}catch(e){}
+function t(k){return (I18N[lang]&&I18N[lang][k])||I18N.uk[k]||k}
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function render(){
+  document.documentElement.lang=lang;
+  document.querySelectorAll('[data-i]').forEach(e=>{ if(!(e.id=='list'&&nets)) e.textContent=t(e.dataset.i)});
+  document.querySelectorAll('[data-ph]').forEach(e=>{e.placeholder=t(e.dataset.ph)});
+  langBtn.textContent=lang=='uk'?'EN':'UK';
+  cur.textContent = info.ap ? t('ap') : (info.cur ? t('cur')+': '+info.cur : '');
+  forgetBtn.style.display = info.stored ? '' : 'none';
+  if(nets){
+    list.innerHTML = nets.length ? nets.map((n,i)=>'<div class="net" onclick="pick('+i+')"><span>'+(n.enc?'🔒 ':'')+esc(n.ssid)+'</span><span class="mini">'+n.rssi+' dBm</span></div>').join('') : t('none');
+  }
+}
+function toggleLang(){lang=lang=='uk'?'en':'uk';try{localStorage.setItem('lang',lang)}catch(e){};render()}
+function pick(i){ssid.value=nets[i].ssid;pass.focus()}
+async function scan(){
+  try{
+    const r=await (await fetch('/wifi/scan')).json();
+    info=r; if(!r.scanning){nets=r.nets||[];}
+    if(!mh.dataset.set){mh.value=r.mh||'';mt.value=r.mt||1883;mu.value=r.mu||'';mh.dataset.set=1}
+    render();
+    if(r.scanning) setTimeout(scan,1500);
+  }catch(e){setTimeout(scan,3000)}
+}
+async function post(url,body){
+  try{ return await (await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body})).json() }
+  catch(e){ return {ok:false,err:'net'} }
+}
+async function save(){
+  msg.style.color='';msg.textContent='';
+  const r=await post('/wifi/save','ssid='+encodeURIComponent(ssid.value)+'&pass='+encodeURIComponent(pass.value)+'&mh='+encodeURIComponent(mh.value)+'&mt='+encodeURIComponent(mt.value)+'&mu='+encodeURIComponent(mu.value)+'&mp='+encodeURIComponent(mp.value));
+  msg.style.color=r.ok?'var(--ok)':'var(--bad)';
+  msg.textContent=r.ok?t('saved'):t('e_'+r.err);
+  if(r.ok){saveBtn.disabled=true}
+}
+async function forget(){
+  if(!confirm(t('confirm'))) return;
+  const r=await post('/wifi/forget','');
+  msg.style.color=r.ok?'var(--ok)':'var(--bad)';
+  msg.textContent=r.ok?t('saved'):t('e_net');
+}
+render();scan();
+</script></body></html>

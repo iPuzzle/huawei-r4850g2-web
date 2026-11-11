@@ -3,58 +3,64 @@
 
 // Сторінка налаштування Wi-Fi (/wifi; у режимі точки доступу — також "/").
 // Список мереж: GET /wifi/scan, збереження: POST /wifi/save, скидання: POST /wifi/forget.
+// Дизайн узгоджено зі стилем jkbms-web.
 const char WIFI_HTML[] PROGMEM = R"WIFIDOC(
 <!DOCTYPE html><html lang="uk"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Wi-Fi · Huawei R4850G2</title>
 <style>
-:root{--bg:#0f1115;--card:#181b21;--line:#272b33;--txt:#e6e8ec;--mut:#8b909a;--acc:#3b82f6;--ok:#22c55e;--err:#ef4444}
-*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
-.wrap{max-width:460px;margin:0 auto;padding:18px}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-h1{font-size:18px;font-weight:600;margin:0}
-.ctl{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
-.ctl h2{font-size:14px;margin:0 0 12px;font-weight:600}
+:root{--bg:#0f1216;--card:#171b21;--line:#262c35;--txt:#e6e9ee;--mut:#8a93a1;--acc:#4ea1ff;--ok:#38c172;--bad:#ef5350}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+header h1{font-size:17px;margin:0;font-weight:600}header .sp{flex:1}
+main{max-width:520px;margin:0 auto;padding:16px;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 12px;font-weight:600}
 .mini{font-size:12px;color:var(--mut)}
-input{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:10px;font-size:15px;margin-bottom:10px}
-button{border:none;border-radius:9px;padding:10px 16px;font-size:14px;font-weight:600;cursor:pointer}
-.apply{background:var(--acc);color:#fff;width:100%}
-.danger{background:transparent;color:var(--err);border:1px solid var(--err);width:100%;margin-top:8px}
-.lang{background:var(--card);border:1px solid var(--line);color:var(--txt);padding:3px 9px;font-size:12px;border-radius:8px}
-.net{display:flex;justify-content:space-between;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
+input{width:100%;background:#20262e;border:1px solid var(--line);color:var(--txt);border-radius:7px;padding:9px 11px;font:inherit;margin-bottom:10px}
+button{font:inherit;color:var(--txt);background:#20262e;border:1px solid var(--line);border-radius:7px;padding:10px 14px;cursor:pointer;font-weight:600}
+button:hover{border-color:#3a4350}
+.pri{background:var(--acc);border-color:var(--acc);color:#04121f;width:100%}
+.dan{background:transparent;border-color:#5a2a2a;color:#ff8a80;width:100%;margin-top:8px}
+.lang{width:auto;padding:4px 10px;font-size:12px;font-weight:400;margin:0}
+.net{display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
 .net:last-child{border-bottom:none}.net:hover{color:var(--acc)}
-#msg{margin-top:10px;font-size:13px}
+.rowh{display:flex;gap:8px}.rowh #mt{width:96px}
+#msg{margin-top:4px;font-size:13px}
 a{color:var(--mut)}
-</style></head><body><div class="wrap">
-<header><h1>Wi-Fi</h1><button class="lang" id="langBtn" onclick="toggleLang()">EN</button></header>
+</style></head><body>
+<header><h1>Wi-Fi · R4850G2</h1><span class="sp"></span><button class="lang" id="langBtn" onclick="toggleLang()">EN</button></header>
+<main>
 
-<div class="ctl">
+<div class="card">
   <h2 data-i="nets">Доступні мережі</h2>
   <div id="list" class="mini" data-i="scanning">Пошук мереж…</div>
 </div>
 
-<div class="ctl">
+<div class="card">
   <h2 data-i="conn">Підключення</h2>
   <div id="cur" class="mini" style="margin-bottom:10px"></div>
   <input id="ssid" maxlength="32" autocomplete="off" autocapitalize="off" data-ph="ssid">
   <input id="pass" type="password" maxlength="63" autocomplete="off" data-ph="pass">
-  <button class="apply" id="saveBtn" data-i="save" onclick="save()">Зберегти й перезавантажити</button>
-  <button class="danger" id="forgetBtn" data-i="forget" style="display:none" onclick="forget()">Забути збережену мережу</button>
+  <button class="pri" id="saveBtn" data-i="save" onclick="save()">Зберегти й перезавантажити</button>
+  <button class="dan" id="forgetBtn" data-i="forget" style="display:none" onclick="forget()">Забути збережену мережу</button>
   <div id="msg"></div>
 </div>
 
-<div class="ctl">
+<div class="card">
   <h2>MQTT</h2>
-  <div style="display:flex;gap:8px">
+  <div class="rowh">
     <input id="mh" maxlength="64" autocomplete="off" autocapitalize="off" data-ph="mh" style="flex:1">
-    <input id="mt" type="number" min="1" max="65535" value="1883" style="width:90px">
+    <input id="mt" type="number" min="1" max="65535" value="1883">
   </div>
   <input id="mu" maxlength="64" autocomplete="off" autocapitalize="off" data-ph="mu">
   <input id="mp" type="password" maxlength="64" autocomplete="off" data-ph="mp">
   <div class="mini" data-i="mqtt_note">Зберігається кнопкою вище разом із Wi-Fi.</div>
 </div>
+
 <div class="mini" style="text-align:center"><a href="/dashboard" data-i="dash">Дашборд</a></div>
-</div>
+
+</main>
 <script>
 const I18N={
  uk:{nets:'Доступні мережі',scanning:'Пошук мереж…',none:'Мереж не знайдено',conn:'Підключення',save:'Зберегти й перезавантажити',forget:'Забути збережену мережу',dash:'Дашборд',
@@ -101,14 +107,14 @@ async function post(url,body){
 async function save(){
   msg.style.color='';msg.textContent='';
   const r=await post('/wifi/save','ssid='+encodeURIComponent(ssid.value)+'&pass='+encodeURIComponent(pass.value)+'&mh='+encodeURIComponent(mh.value)+'&mt='+encodeURIComponent(mt.value)+'&mu='+encodeURIComponent(mu.value)+'&mp='+encodeURIComponent(mp.value));
-  msg.style.color=r.ok?'var(--ok)':'var(--err)';
+  msg.style.color=r.ok?'var(--ok)':'var(--bad)';
   msg.textContent=r.ok?t('saved'):t('e_'+r.err);
   if(r.ok){saveBtn.disabled=true}
 }
 async function forget(){
   if(!confirm(t('confirm'))) return;
   const r=await post('/wifi/forget','');
-  msg.style.color=r.ok?'var(--ok)':'var(--err)';
+  msg.style.color=r.ok?'var(--ok)':'var(--bad)';
   msg.textContent=r.ok?t('saved'):t('e_net');
 }
 render();scan();

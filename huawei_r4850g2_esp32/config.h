@@ -25,6 +25,12 @@
 #define WIFI_CONNECT_TIMEOUT_S  10      // скільки чекати підключення при старті
 #define WIFI_RESET_HOLD_MS      3000    // утримання кнопки on/off при старті = скинути Wi-Fi й піднятись AP
 
+// ---- Вхід у вебінтерфейс (HTTP Basic Auth) ----
+// Діє в режимі STA (після підключення до роутера). У режимі налаштування (AP)
+// пароль не вимагається, щоб можна було провести первинне налаштування.
+#define WEB_USER          "admin"
+#define WEB_DEFAULT_PASS  "admin"        // ЗМІНІТЬ на дашборді! (мін. 6 символів)
+
 // ---- MQTT / Home Assistant ----
 #define MQTT_ENABLED         true               // головний перемикач на етапі збірки
 // Хост/порт — лише значення за замовчуванням. Налаштування зі сторінки /wifi
@@ -78,17 +84,11 @@
 #define FAN_MODE_DEFAULT   0
 #define FAN_DUTY_DEFAULT   0.0f      // %, 0 = auto
 
-// ---- Автоматика зарядки LiFePO4 (CV/CC + tapering) ----
-#define CHG_ENABLED_ON_BOOT   false
-// Приклади нижче — для 16S LiFePO4 (~3.5 В/комірку). Змініть під свій банк!
-#define CHG_VOLTAGE          56.0f   // напруга absorption (CV), В
-#define CHG_CURRENT          30.0f   // струм bulk (CC), А
-#define CHG_TAIL_CURRENT      3.0f   // струм завершення (tail), А  (~0.05C)
-#define CHG_ABSORB_HOLD_S     120    // сек нижче tail, перш ніж вважати заряд завершеним
-#define CHG_FLOAT_VOLTAGE     0.0f   // 0 = вимкнути вихід після заряду; інакше float, В (напр. 54.0)
-#define CHG_RECHARGE_VOLTAGE 51.0f   // у float-режимі: якщо напруга просіла нижче — новий цикл
-#define CHG_MAX_TIME_S       28800   // запобіжник: макс. тривалість заряду (8 год)
-#define CHG_MAX_TEMP         70.0f   // °C: перевищення темп. виходу -> FAULT (вихід off)
+// ---- Дефолтні значення, що ЗАПИСУЮТЬСЯ у самі модулі (offline-регістри) ----
+// Діють, коли модуль стартує БЕЗ нашого контролера (standalone). Це лише
+// початкові значення для UI — реально задаються на дашборді й зберігаються в NVS.
+#define PSU_DEFAULT_VOLTAGE   53.5f   // дефолтна напруга модуля, В (валідно 48.0..58.4)
+#define PSU_DEFAULT_CURRENT   62.5f   // дефолтний струм, А на модуль
 
 // ---- Опційний OLED-дисплей (SSD1306 128x64, SPI) ----
 // Бібліотеки (Library Manager): "Adafruit SSD1306" + "Adafruit GFX Library"

@@ -22,6 +22,8 @@
 #include <Preferences.h>
 #include "driver/twai.h"
 #include <ESPAsyncWebServer.h>
+#include <Update.h>
+#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
@@ -96,36 +98,47 @@ struct Button {
   }
 };
 
-float spVoltage = DEFAULT_VOLTAGE;
-float spCurrent = DEFAULT_CURRENT;
+float spVoltage = DEFAULT_VOLTAGE;     // робочий (online) setpoint напруги
+float spCurrent = DEFAULT_CURRENT;     // робочий (online) ліміт струму, СУМАРНИЙ
 bool  spOutput  = DEFAULT_OUTPUT_ON;
+
+float psuDefV = PSU_DEFAULT_VOLTAGE;   // дефолт, що пишемо в модулі (offline), В
+float psuDefA = PSU_DEFAULT_CURRENT;   // дефолт струму, А на модуль
 
 float   fanDutySp = FAN_DUTY_DEFAULT;
 uint8_t fanMode   = FAN_MODE_DEFAULT;   // 0=auto, 1=max
 
-// --- автоматика зарядки ---
-enum ChargeState { CHG_OFF, CHG_BULK, CHG_ABSORB, CHG_DONE, CHG_FLOAT, CHG_FAULT };
-ChargeState chgState = CHG_OFF;
-bool  chgEnabled = CHG_ENABLED_ON_BOOT;
-float chgVoltage = CHG_VOLTAGE, chgCurrent = CHG_CURRENT, chgTail = CHG_TAIL_CURRENT;
-float chgFloat = CHG_FLOAT_VOLTAGE, chgRecharge = CHG_RECHARGE_VOLTAGE;
-uint32_t chgAbsorbHold = CHG_ABSORB_HOLD_S, chgMaxTime = CHG_MAX_TIME_S;
-float chgMaxTemp = CHG_MAX_TEMP;
-unsigned long chgStart = 0, tailStart = 0;
+unsigned long oledFlash = 0;            // мить останнього натискання апаратної кнопки (індикація)
 
-const char* chargeStateName() {
-  switch (chgState) {
-    case CHG_BULK:   return "bulk";
-    case CHG_ABSORB: return "absorb";
-    case CHG_DONE:   return "done";
-    case CHG_FLOAT:  return "float";
-    case CHG_FAULT:  return "fault";
-    default:         return "off";
-  }
+// Відкладене збереження робочих setpoint-ів у NVS (щоб не зношувати флеш)
+bool spDirty = false; unsigned long spDirtyAt = 0;
+void markSp() { spDirty = true; spDirtyAt = millis(); }
+
+// ---- Збереження/відновлення в NVS (переживає повне зникнення живлення) ------
+void spLoad() {
+  Preferences p; p.begin("sp", true);
+  spVoltage = p.getFloat("v",  DEFAULT_VOLTAGE);
+  spCurrent = p.getFloat("a",  DEFAULT_CURRENT);
+  spOutput  = p.getBool ("o",  DEFAULT_OUTPUT_ON);
+  psuDefV   = p.getFloat("dv", PSU_DEFAULT_VOLTAGE);
+  psuDefA   = p.getFloat("da", PSU_DEFAULT_CURRENT);
+  p.end();
+}
+void spSave() {
+  Preferences p; p.begin("sp", false);
+  p.putFloat("v", spVoltage); p.putFloat("a", spCurrent); p.putBool("o", spOutput);
+  p.end();
+}
+void psuDefSave() {
+  Preferences p; p.begin("sp", false);
+  p.putFloat("dv", psuDefV); p.putFloat("da", psuDefA);
+  p.end();
 }
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+AsyncAuthenticationMiddleware webAuth;   // Basic Auth для дашборда/керування (лише в режимі STA)
+bool otaReady = false;                   // ArduinoOTA ініціалізовано (лише STA)
 WiFiClient wifiClient;
 bool apMode = false;               // true = піднята точка доступу для налаштування Wi-Fi
 DNSServer dnsServer;               // captive portal (усі імена -> IP точки доступу)
@@ -235,6 +248,17 @@ void canRequestFanStatus() {   // get 0x0187
 void canRequestDetail() {      // get 0x018F (детальна аварійна інфо)
   uint8_t d[8] = { 0x01, R_DETAIL, 0, 0, 0, 0, 0, 0 };
   canSend(ID_GET_REQ, d);
+}
+
+// Запис дефолтних (offline/енергонезалежних) значень у самі модулі — у їхній ROM.
+// Діють, коли модуль стартує без контролера (standalone).
+void writePsuDefaults() {
+  uint32_t rv = (uint32_t)lroundf(constrain(psuDefV, VOLT_MIN, VOLT_MAX) * 1024.0f);
+  setValueReg(SET_VOLT_OFFLINE, rv);
+  float a = constrain(psuDefA, 0.0f, CURR_MAX);
+  uint32_t ra = (uint32_t)lroundf(a / RATED_MAX_CURRENT * 1250.0f);
+  setValueReg(SET_CURR_OFFLINE, ra);
+  Serial.printf(TR("[DEF] у модулі: %.1f В / %.1f А-модуль\n", "[DEF] to modules: %.1f V / %.1f A-module\n"), psuDefV, a);
 }
 
 void resendSetpoints() {   // тримаємо online-значення "живими"
@@ -367,70 +391,6 @@ void diagTick() {
   psuCheck();
 }
 
-// Оновити setpoint-и й застосувати лише змінене (щоб не спамити шину)
-void setSp(float v, float a, bool out) {
-  if (fabsf(v - spVoltage) > 0.05f) { spVoltage = v; applyVoltage(v); }
-  if (fabsf(a - spCurrent) > 0.05f) { spCurrent = a; applyCurrent(a); }
-  if (out != spOutput)              { spOutput  = out; applyOutput(out); }
-}
-
-// Стан-машина зарядки LiFePO4:
-//   BULK (CC) -> ABSORB (CV, струм спадає сам) -> завершення за tail-струмом
-//   -> вимкнення виходу або FLOAT. Викликати періодично.
-void chargeTick() {
-  if (!chgEnabled) { chgState = CHG_OFF; return; }
-  unsigned long now = millis();
-
-  // запобіжник по температурі
-  if (canAlive() && !isnan(ag.tOut) && ag.tOut > chgMaxTemp) {
-    if (chgState != CHG_FAULT) logError(TR("Зарядка: перегрів виходу", "Charge: output overtemperature"));
-    chgState = CHG_FAULT; setSp(spVoltage, spCurrent, false); return;
-  }
-
-  switch (chgState) {
-    case CHG_OFF:                       // щойно увімкнули автозарядку
-      chgStart = now; tailStart = 0;
-      setSp(chgVoltage, chgCurrent, true);
-      chgState = CHG_BULK;
-      break;
-
-    case CHG_BULK:                      // модулі у CC, тримають струм, напруга росте
-      setSp(chgVoltage, chgCurrent, true);
-      if (!isnan(ag.outV) && ag.outV >= chgVoltage - 0.15f) { chgState = CHG_ABSORB; tailStart = 0; }
-      if (now - chgStart > chgMaxTime * 1000UL) { logError(TR("Зарядка: таймаут", "Charge: timeout")); chgState = CHG_FAULT; }
-      break;
-
-    case CHG_ABSORB:                    // модулі у CV, сумарний струм спадає; чекаємо tail
-      setSp(chgVoltage, chgCurrent, true);
-      if (!isnan(ag.outA) && ag.outA <= chgTail) {
-        if (tailStart == 0) tailStart = now;
-        else if (now - tailStart >= chgAbsorbHold * 1000UL) chgState = CHG_DONE;
-      } else tailStart = 0;
-      if (now - chgStart > chgMaxTime * 1000UL) { logError(TR("Зарядка: таймаут", "Charge: timeout")); chgState = CHG_FAULT; }
-      break;
-
-    case CHG_DONE:
-      if (chgFloat > 0) chgState = CHG_FLOAT;
-      else setSp(spVoltage, spCurrent, false);      // вихід off, лишаємось у DONE
-      break;
-
-    case CHG_FLOAT:
-      setSp(chgFloat, chgCurrent, true);
-      if (!isnan(ag.outV) && ag.outV < chgRecharge) { chgStart = now; tailStart = 0; chgState = CHG_BULK; }
-      break;
-
-    case CHG_FAULT:                      // латч: скидається лише перезапуском зарядки
-      setSp(spVoltage, spCurrent, false);
-      break;
-  }
-}
-
-void startCharge(bool on) {
-  chgEnabled = on;
-  chgState = CHG_OFF;   // гілка OFF сама переведе в BULK, якщо on
-  if (on) chargeTick();
-}
-
 // ---- JSON статусу ----------------------------------------------------------
 void buildStatusJson(char* buf, size_t n) {
   JsonDocument doc;
@@ -441,8 +401,7 @@ void buildStatusJson(char* buf, size_t n) {
   doc["spV"]=spVoltage; doc["spA"]=spCurrent;
   doc["output"]=spOutput; doc["can"]=canAlive();
   doc["fanRpm"]=ag.fanRpm; doc["fanDuty"]=ag.fanDuty; doc["fanSp"]=fanDutySp; doc["fanMode"]=fanMode;
-  doc["chg"]=chgEnabled; doc["chgState"]=chargeStateName();
-  doc["chgV"]=chgVoltage; doc["chgA"]=chgCurrent; doc["chgTail"]=chgTail;
+  doc["defV"]=psuDefV; doc["defA"]=psuDefA;
   JsonArray arr = doc["u"].to<JsonArray>();
   for (int i = 1; i <= MAX_UNITS; i++) {
     if (!unitPresent(i)) continue;
@@ -475,15 +434,14 @@ void handleCommand(const char* json) {
   const char* cmd = d["cmd"];
   if (!cmd) return;
   float val = d["value"] | 0.0f;
-  if (!strcmp(cmd, "voltage"))      { chgEnabled=false; spVoltage = constrain(val, VOLT_MIN, VOLT_MAX); applyVoltage(spVoltage); }
-  else if (!strcmp(cmd, "current")) { chgEnabled=false; spCurrent = constrain(val, CURR_MIN, CURR_MAX); applyCurrent(spCurrent); }
-  else if (!strcmp(cmd, "output"))  { chgEnabled=false; spOutput  = (val != 0); applyOutput(spOutput); }
+  if (!strcmp(cmd, "voltage"))      { spVoltage = constrain(val, VOLT_MIN, VOLT_MAX); applyVoltage(spVoltage); markSp(); }
+  else if (!strcmp(cmd, "current")) { spCurrent = constrain(val, CURR_MIN, CURR_MAX * MAX_UNITS); applyCurrent(spCurrent); markSp(); }
+  else if (!strcmp(cmd, "output"))  { spOutput  = (val != 0); applyOutput(spOutput); markSp(); }
   else if (!strcmp(cmd, "fanmode")) { fanMode = (uint8_t)val; applyFan(); }
   else if (!strcmp(cmd, "fanduty")) { fanMode = 0; fanDutySp = constrain(val, 0.0f, 100.0f); applyFan(); }
-  else if (!strcmp(cmd, "charge"))  { startCharge(val != 0); }
-  else if (!strcmp(cmd, "chg_v"))   { chgVoltage = constrain(val, VOLT_MIN, VOLT_MAX); }
-  else if (!strcmp(cmd, "chg_a"))   { chgCurrent = constrain(val, CURR_MIN, CURR_MAX); }
-  else if (!strcmp(cmd, "chg_tail")){ chgTail    = constrain(val, 0.0f, CURR_MAX); }
+  else if (!strcmp(cmd, "def_v"))    { psuDefV = constrain(val, VOLT_MIN, VOLT_MAX); psuDefSave(); }
+  else if (!strcmp(cmd, "def_a"))    { psuDefA = constrain(val, 0.0f, CURR_MAX);   psuDefSave(); }
+  else if (!strcmp(cmd, "def_write")){ writePsuDefaults(); }
   mqttPublishState();
 }
 
@@ -700,15 +658,13 @@ void mqttPublishDiscovery() {
   haSensor("fan_rpm", "Fan RPM", "rpm", "", "fanRpm");
   haNumber("fan_duty", "Fan duty", "%", "fanSp", "fanduty", 0, 100, 5);
   haSwitchG("fan_max", "Fan max", "{{ 'ON' if value_json.fanMode == 1 else 'OFF' }}", "fanmax");
-  // автозарядка
-  haSwitchG("charge", "Auto charge", "{{ 'ON' if value_json.chg else 'OFF' }}", "charge");
-  haTextSensor("chg_state", "Charge state", "chgState");
+  // діагностика
   haTextSensor("can_state", "CAN state", "diag.can");
   haTextSensor("last_error", "Last error", "diag.err");
   haBinary("psu_alarm", "PSU alarm", "problem", "{{ 'ON' if value_json.psuAlarm else 'OFF' }}");
-  haNumber("chg_v", "Charge voltage", "V", "chgV", "chg_v", VOLT_MIN, VOLT_MAX, 0.1);
-  haNumber("chg_a", "Charge current", "A", "chgA", "chg_a", CURR_MIN, CURR_MAX, 0.5);
-  haNumber("chg_tail", "Tail current", "A", "chgTail", "chg_tail", 0, CURR_MAX, 0.5);
+  // дефолтні значення модулів (standalone)
+  haNumber("def_v", "Default voltage", "V", "defV", "def_v", VOLT_MIN, VOLT_MAX, 0.1);
+  haNumber("def_a", "Default current", "A", "defA", "def_a", 0, CURR_MAX, 0.5);
 }
 
 void mqttPublishState() {
@@ -723,15 +679,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   String t(topic); String msg; msg.reserve(len);
   for (unsigned i = 0; i < len; i++) msg += (char)payload[i];
   mqttCmdCount++;
-  if (t.endsWith("/set/voltage")) { chgEnabled=false; spVoltage = constrain(msg.toFloat(), VOLT_MIN, VOLT_MAX); applyVoltage(spVoltage); }
-  else if (t.endsWith("/set/current")) { chgEnabled=false; spCurrent = constrain(msg.toFloat(), CURR_MIN, CURR_MAX); applyCurrent(spCurrent); }
-  else if (t.endsWith("/set/output"))  { chgEnabled=false; spOutput  = (msg == "ON" || msg == "1"); applyOutput(spOutput); }
+  if (t.endsWith("/set/voltage")) { spVoltage = constrain(msg.toFloat(), VOLT_MIN, VOLT_MAX); applyVoltage(spVoltage); markSp(); }
+  else if (t.endsWith("/set/current")) { spCurrent = constrain(msg.toFloat(), CURR_MIN, CURR_MAX * MAX_UNITS); applyCurrent(spCurrent); markSp(); }
+  else if (t.endsWith("/set/output"))  { spOutput  = (msg == "ON" || msg == "1"); applyOutput(spOutput); markSp(); }
   else if (t.endsWith("/set/fanmax"))  { fanMode = (msg == "ON" || msg == "1") ? 1 : 0; applyFan(); }
   else if (t.endsWith("/set/fanduty")) { fanMode = 0; fanDutySp = constrain(msg.toFloat(), 0.0f, 100.0f); applyFan(); }
-  else if (t.endsWith("/set/charge"))  { startCharge(msg == "ON" || msg == "1"); }
-  else if (t.endsWith("/set/chg_v"))   { chgVoltage = constrain(msg.toFloat(), VOLT_MIN, VOLT_MAX); }
-  else if (t.endsWith("/set/chg_a"))   { chgCurrent = constrain(msg.toFloat(), CURR_MIN, CURR_MAX); }
-  else if (t.endsWith("/set/chg_tail")){ chgTail    = constrain(msg.toFloat(), 0.0f, CURR_MAX); }
+  else if (t.endsWith("/set/def_v"))    { psuDefV = constrain(msg.toFloat(), VOLT_MIN, VOLT_MAX); psuDefSave(); }
+  else if (t.endsWith("/set/def_a"))    { psuDefA = constrain(msg.toFloat(), 0.0f, CURR_MAX);   psuDefSave(); }
+  else if (t.endsWith("/set/def_write")){ writePsuDefaults(); }
   mqttPublishState();
 }
 
@@ -806,8 +761,7 @@ void oledDraw() {
   if (isnan(ag.outV)) oled.print("--.- V"); else oled.printf("%.1f V", ag.outV);
   oled.setCursor(0, 36);
   if (isnan(ag.outA)) oled.print("--.- A"); else oled.printf("%.1f A", ag.outA);
-  // підвал: setpoint + стан зарядки
-  // підвал: аварія модуля (латиницею) або setpoint + стан зарядки
+  // підвал: аварія модуля (латиницею) або поточний setpoint
   oled.setTextSize(1);
   oled.setCursor(0, 56);
   int fu = 0; const char* ft = nullptr;
@@ -817,7 +771,9 @@ void oledDraw() {
   }
   if (ft)          oled.printf("! U%d %s", fu, ft);
   else if (apMode) oled.print("WiFi AP 192.168.4.1");
-  else    oled.printf("set %.0f/%.0f  %s", spVoltage, spCurrent, chargeStateName());
+  else             oled.printf("set %.1f V / %.0f A", spVoltage, spCurrent);
+  // індикація натискання апаратної кнопки — смужка внизу екрана (~250 мс)
+  if (millis() - oledFlash < 250) oled.fillRect(0, 62, OLED_WIDTH, 2, SSD1306_WHITE);
   oled.display();
 }
 #else
@@ -835,18 +791,19 @@ void buttonsInit() {
 }
 
 void buttonsPoll() {
-  if (btnOn.pressed()) {                              // toggle виходу (виходить з автозарядки)
-    chgEnabled = false; spOutput = !spOutput; applyOutput(spOutput); mqttPublishState();
+  if (btnOn.pressed()) {                              // перемикання виходу
+    spOutput = !spOutput; applyOutput(spOutput);
+    markSp(); oledFlash = millis(); mqttPublishState();
   }
   if (btnUp.pressed()) {                              // струм + (сумарний)
-    chgEnabled = false;
     spCurrent = constrain(spCurrent + CURR_STEP, CURR_MIN, CURR_MAX * MAX_UNITS);
-    applyCurrent(spCurrent); mqttPublishState();
+    applyCurrent(spCurrent);
+    markSp(); oledFlash = millis(); mqttPublishState();
   }
   if (btnDn.pressed()) {                              // струм −
-    chgEnabled = false;
     spCurrent = constrain(spCurrent - CURR_STEP, CURR_MIN, CURR_MAX * MAX_UNITS);
-    applyCurrent(spCurrent); mqttPublishState();
+    applyCurrent(spCurrent);
+    markSp(); oledFlash = millis(); mqttPublishState();
   }
 }
 #else
@@ -882,12 +839,49 @@ void wifiForget() {                               // MQTT-логін у NVS ли
   p.end();
 }
 
+// Пароль вебінтерфейсу (NVS, namespace "wifi", ключ "wp"). Дефолт — WEB_DEFAULT_PASS.
+String webPassLoad() {
+  Preferences p; p.begin("wifi", true);
+  String s = p.getString("wp", WEB_DEFAULT_PASS);
+  p.end();
+  return s;
+}
+void webPassSave(const String& pw) {
+  Preferences p; p.begin("wifi", false);
+  p.putString("wp", pw);
+  p.end();
+}
+
+// ArduinoOTA (прошивка через мережу: pio run -e esp32dev_ota -t upload).
+// Пароль — той самий, що й у вебінтерфейсі.
+void otaBegin() {
+  if (otaReady) return;
+  ArduinoOTA.setHostname(HOSTNAME);
+  ArduinoOTA.setPassword(webPassLoad().c_str());
+  ArduinoOTA.onStart([]() { Serial.println(TR("[OTA] початок", "[OTA] start")); });
+  ArduinoOTA.onEnd([]()   { Serial.println(TR("[OTA] готово",  "[OTA] done")); });
+  ArduinoOTA.begin();
+  otaReady = true;
+}
+
 void mqttConfigLoad() {                           // ключі NVS: mh=хост, mt=порт, mu=логін, mp=пароль
   Preferences p; p.begin("wifi", true);
   if (p.isKey("mh")) mqttHost = p.getString("mh", "");   // збережений порожній хост = MQTT вимкнено
   mqttPort = p.getUShort("mt", MQTT_PORT);
   mqttUser = p.getString("mu", ""); mqttPass = p.getString("mp", "");
   p.end();
+}
+
+// Застосувати поточні MQTT-глобали до клієнта без перезавантаження:
+// розірвати старе зʼєднання й переналаштувати сервер; reconnect підхопить loop().
+void mqttApplyLive() {
+  if (mqtt.connected()) mqtt.disconnect();
+  if (mqttOn()) {
+    mqtt.setServer(mqttHost.c_str(), mqttPort);
+    mqtt.setBufferSize(2048);
+    mqtt.setSocketTimeout(2);
+    mqtt.setCallback(mqttCallback);
+  }
 }
 
 bool wifiConnect(const String& ssid, const String& pass) {
@@ -901,6 +895,7 @@ bool wifiConnect(const String& ssid, const String& pass) {
 void wifiOnConnected() {
   Serial.print("[WiFi] IP: "); Serial.println(WiFi.localIP());
   if (MDNS.begin(HOSTNAME)) Serial.printf("[mDNS] http://%s.local\n", HOSTNAME);
+  otaBegin();                                     // мережеве OTA доступне в режимі STA
 }
 
 void wifiStartAp() {
@@ -960,13 +955,25 @@ void wifiTick() {
 }
 
 void wifiRoutes() {
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
-    r->send_P(200, "text/html", apMode ? WIFI_HTML : INDEX_HTML);
-  });
-  server.on("/dashboard", HTTP_GET, [](AsyncWebServerRequest* r) { r->send_P(200, "text/html", INDEX_HTML); });
-  server.on("/wifi",      HTTP_GET, [](AsyncWebServerRequest* r) { r->send_P(200, "text/html", WIFI_HTML); });
+  bool guard = !apMode;                             // у режимі налаштування (AP) пароль не вимагаємо
 
-  server.on("/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* r) {
+  webAuth.setUsername(WEB_USER);
+  webAuth.setPassword(webPassLoad().c_str());
+  webAuth.setRealm("Huawei R4850");
+  webAuth.setAuthFailureMessage(TR("Потрібна автентифікація", "Authentication required"));
+  webAuth.setAuthType(AsyncAuthType::AUTH_BASIC);
+  webAuth.generateHash();
+  if (guard) ws.addMiddleware(&webAuth);            // WebSocket теж під паролем у STA
+
+  { auto& h = server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
+      r->send_P(200, "text/html", apMode ? WIFI_HTML : INDEX_HTML);
+    }); if (guard) h.addMiddleware(&webAuth); }
+  { auto& h = server.on("/dashboard", HTTP_GET, [](AsyncWebServerRequest* r) { r->send_P(200, "text/html", INDEX_HTML); });
+    if (guard) h.addMiddleware(&webAuth); }
+  { auto& h = server.on("/wifi", HTTP_GET, [](AsyncWebServerRequest* r) { r->send_P(200, "text/html", WIFI_HTML); });
+    if (guard) h.addMiddleware(&webAuth); }
+
+  { auto& h = server.on("/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* r) {
     JsonDocument d;
     d["ap"] = apMode;
     d["stored"] = wifiStored();
@@ -994,9 +1001,9 @@ void wifiRoutes() {
     }
     String out; serializeJson(d, out);
     r->send(200, "application/json", out);
-  });
+  }); if (guard) h.addMiddleware(&webAuth); }
 
-  server.on("/wifi/save", HTTP_POST, [](AsyncWebServerRequest* r) {
+  { auto& h = server.on("/wifi/save", HTTP_POST, [](AsyncWebServerRequest* r) {
     String ssid = r->hasParam("ssid", true) ? r->getParam("ssid", true)->value() : "";
     String pass = r->hasParam("pass", true) ? r->getParam("pass", true)->value() : "";
     if (ssid.length() < 1 || ssid.length() > 32) { r->send(400, "application/json", "{\"ok\":false,\"err\":\"ssid\"}"); return; }
@@ -1021,14 +1028,66 @@ void wifiRoutes() {
     Serial.printf(TR("[WiFi] збережено '%s', перезавантаження\n", "[WiFi] saved '%s', rebooting\n"), ssid.c_str());
     r->send(200, "application/json", "{\"ok\":true}");
     restartAt = millis() + 1500;
-  });
+  }); if (guard) h.addMiddleware(&webAuth); }
 
-  server.on("/wifi/forget", HTTP_POST, [](AsyncWebServerRequest* r) {
+  { auto& h = server.on("/wifi/forget", HTTP_POST, [](AsyncWebServerRequest* r) {
     wifiForget();
     Serial.println(TR("[WiFi] збережені параметри видалено, перезавантаження", "[WiFi] saved credentials cleared, rebooting"));
     r->send(200, "application/json", "{\"ok\":true}");
     restartAt = millis() + 1500;
-  });
+  }); if (guard) h.addMiddleware(&webAuth); }
+
+  // Зміна пароля вебінтерфейсу (p=новий, мін. 6 символів) -> перезавантаження
+  { auto& h = server.on("/api/password", HTTP_POST, [](AsyncWebServerRequest* r) {
+    if (!r->hasParam("p", true)) { r->send(400, "application/json", "{\"ok\":false}"); return; }
+    String p = r->getParam("p", true)->value();
+    if (p.length() < 6) { r->send(400, "application/json", "{\"ok\":false,\"err\":\"short\"}"); return; }
+    webPassSave(p);
+    Serial.println(TR("[WEB] пароль змінено, перезавантаження", "[WEB] password changed, rebooting"));
+    r->send(200, "application/json", "{\"ok\":true}");
+    restartAt = millis() + 1500;
+  }); if (guard) h.addMiddleware(&webAuth); }
+
+  // Зміна лише MQTT — без Wi-Fi і БЕЗ перезавантаження (застосовується на льоту).
+  // Порожній хост = MQTT вимкнено; порожній логін = анонімно; порожній пароль = лишити старий.
+  { auto& h = server.on("/api/mqtt", HTTP_POST, [](AsyncWebServerRequest* r) {
+    String mh = r->hasParam("mh", true) ? r->getParam("mh", true)->value() : "";
+    String mu = r->hasParam("mu", true) ? r->getParam("mu", true)->value() : "";
+    String mp = r->hasParam("mp", true) ? r->getParam("mp", true)->value() : "";
+    long mt = r->hasParam("mt", true) ? r->getParam("mt", true)->value().toInt() : mqttPort;
+    mh.trim();
+    if (mh.length() > 64 || mu.length() > 64 || mp.length() > 64) { r->send(400, "application/json", "{\"ok\":false,\"err\":\"mqtt\"}"); return; }
+    if (mh.length() > 0 && (mt < 1 || mt > 65535)) { r->send(400, "application/json", "{\"ok\":false,\"err\":\"port\"}"); return; }
+    { Preferences p; p.begin("wifi", false);
+      p.putString("mh", mh);
+      if (mh.length() > 0) p.putUShort("mt", (uint16_t)mt);
+      if (mu.length() == 0) { p.remove("mu"); p.remove("mp"); }
+      else { p.putString("mu", mu); if (mp.length()) p.putString("mp", mp); }
+      p.end(); }
+    mqttConfigLoad();                               // перечитати глобали з NVS
+    mqttApplyLive();                                // застосувати без перезавантаження
+    Serial.println(TR("[MQTT] налаштування оновлено (без ребуту)", "[MQTT] settings updated (no reboot)"));
+    r->send(200, "application/json", "{\"ok\":true}");
+  }); if (guard) h.addMiddleware(&webAuth); }
+
+  // OTA через браузер: завантаження firmware.bin, потім перезавантаження
+  { auto& h = server.on("/update", HTTP_POST,
+    [](AsyncWebServerRequest* r) {
+      bool ok = !Update.hasError();
+      r->send(ok ? 200 : 500, "text/plain; charset=utf-8", ok ? "OK" : Update.errorString());
+      if (ok) restartAt = millis() + 1500;
+    },
+    [](AsyncWebServerRequest* r, const String& fn, size_t index, uint8_t* data, size_t len, bool final) {
+      if (index == 0) {
+        Serial.printf(TR("[OTA] веб-оновлення: %s\n", "[OTA] web update: %s\n"), fn.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) Serial.println(Update.errorString());
+      }
+      if (!Update.hasError() && Update.write(data, len) != len) Serial.println(Update.errorString());
+      if (final) {
+        if (Update.end(true)) Serial.printf(TR("[OTA] записано %u байт\n", "[OTA] wrote %u bytes\n"), (unsigned)(index + len));
+        else Serial.println(Update.errorString());
+      }
+    }); if (guard) h.addMiddleware(&webAuth); }
 
   // captive portal: будь-який невідомий запит у режимі AP -> сторінка налаштування
   server.onNotFound([](AsyncWebServerRequest* r) {
@@ -1044,6 +1103,7 @@ void setup() {
 
   oledInit();
   buttonsInit();
+  spLoad();              // відновити збережені напругу/струм/вихід з NVS
 
   twaiInit();
 
@@ -1091,16 +1151,18 @@ void loop() {
 
   buttonsPoll();
   wifiTick();
+  if (otaReady) ArduinoOTA.handle();
 
   unsigned long now = millis();
-  static unsigned long tReq = 0, tPush = 0, tResend = 0, tChg = 0, tOled = 0, tDiag = 0;
+  static unsigned long tReq = 0, tPush = 0, tResend = 0, tOled = 0, tDiag = 0;
 
   if (now - tReq    >= 2000) { tReq    = now; canRequestData(); canRequestFanStatus(); if (anyDetailNeeded()) canRequestDetail(); }
   if (now - tPush   >= 1500) { tPush   = now; pushStatus(); mqttPublishState(); }
   if (now - tResend >= 10000){ tResend = now; resendSetpoints(); }
-  if (now - tChg    >= 2000) { tChg    = now; chargeTick(); }
   if (now - tOled   >= 250)  { tOled   = now; oledDraw(); }
   if (now - tDiag   >= 1000) { tDiag   = now; diagTick(); }
+
+  if (spDirty && now - spDirtyAt > 1500) { spDirty = false; spSave(); }  // відкладене збереження в NVS
 
   if (mqttOn()) { mqttReconnect(); mqtt.loop(); }
   ws.cleanupClients();
