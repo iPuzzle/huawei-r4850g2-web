@@ -60,6 +60,10 @@ static const uint8_t SET_FAN_MODE     = 0x34;  // data[3]: 0=auto, 1=max, 2=max(
 
 // Читання регістрів через "get" (команда 0x82) — теж broadcast
 static const uint32_t ID_GET_REQ   = 0x108082FE;
+// Handshake-запит (cmd 0x50) поадресно: 0x1081 50 FE, 0x1082 50 FE … Модуль
+// відповідає на 0x108N507F своїм серійником (рег. 0x02), типом плати (0x03/0x04)
+// і слотом (0x06). Так робочі проєкти «знайомляться» з кожним модулем.
+static inline uint32_t idHandshake(uint8_t addr){ return 0x108050FEUL + ((uint32_t)addr << 16); }
 static const uint8_t  R_FAN_STATUS = 0x87;      // 0x0187: min duty / duty target / RPM
 static const uint8_t  R_DETAIL     = 0x8F;      // 0x018F: детальна аварійна інфо (коли bit2 у 0x83)
 
@@ -72,6 +76,10 @@ struct Unit {
   uint32_t alarm=0;                 // сире слово аварій/статусу (рег. 0x83)
   bool acFail=false, overTemp=false, alarmBit2=false;
   char reg8F[16]="";                // сирі байти 0x018F (hex), коли bit2 активний
+  char serial[13]="";               // серійник (handshake рег. 0x02), hex
+  char model[13]="";                // ASCII з рег. 0x03+0x04 (тип/дата плати)
+  uint8_t slot=0;                   // рег. 0x06 — позиція/слот модуля
+  bool hs=false;                    // отримано handshake-відповідь
   unsigned long lastRx=0;
 };
 Unit u[MAX_UNITS + 1];        // індекс 1..MAX_UNITS (0 не використовується)
@@ -156,6 +164,33 @@ int canTxErrCnt = 0, canRxErrCnt = 0;
 char lastErr[48] = "";
 unsigned long lastErrMs = 0;
 
+// ---- Тихий старт + CAN trace ------------------------------------------------
+// canQuietUntil: до цієї мітки часу canSend() нічого не передає в шину, щоб
+// модулі встигли розподілити адреси. canStarted: позначка, що тихе вікно минуло
+// і робочі setpoint-и вже застосовано.
+unsigned long canQuietUntil = 0;
+bool canStarted = false;
+
+// Кільцевий буфер кадрів для debug-секції (RX + TX). За замовчуванням ловить
+// перші TRACE_LEN кадрів після старту (знімок негоціації) і «замерзає»;
+// режим traceRolling робить його рухомим (завжди найновіші кадри).
+struct Frame { uint32_t ms; uint32_t id; uint8_t dlc; uint8_t d[8]; uint8_t dir; }; // dir: 0=rx, 1=tx
+Frame    traceBuf[TRACE_LEN];
+uint16_t traceHead = 0, traceCount = 0;
+bool     traceFrozen = false, traceRolling = false, traceOn = false;
+
+void traceClear() { traceHead = 0; traceCount = 0; traceFrozen = false; }
+
+void traceAdd(uint32_t id, uint8_t dlc, const uint8_t* d, uint8_t dir) {
+  if (traceFrozen && !traceRolling) return;            // знімок зафіксовано
+  Frame &f = traceBuf[traceHead];
+  f.ms = millis(); f.id = id; f.dlc = dlc; f.dir = dir;
+  memcpy(f.d, d, 8);
+  traceHead = (traceHead + 1) % TRACE_LEN;
+  if (traceCount < TRACE_LEN) traceCount++;
+  if (traceCount >= TRACE_LEN && !traceRolling) traceFrozen = true;  // буфер повний -> зберегти знімок
+}
+
 void logError(const char* msg) {
   strncpy(lastErr, msg, sizeof(lastErr) - 1);
   lastErr[sizeof(lastErr) - 1] = 0;
@@ -175,10 +210,11 @@ void twaiInit() {
 }
 
 bool canSend(uint32_t id, const uint8_t d[8]) {
+  if (millis() < canQuietUntil) return false;      // тихий старт: мовчимо, поки модулі ділять адреси
   twai_message_t m = {};
   m.identifier = id; m.extd = 1; m.data_length_code = 8;
   memcpy(m.data, d, 8);
-  if (twai_transmit(&m, pdMS_TO_TICKS(50)) == ESP_OK) return true;
+  if (twai_transmit(&m, pdMS_TO_TICKS(50)) == ESP_OK) { traceAdd(id, 8, d, 1); return true; }
   canTxFail++;
   return false;
 }
@@ -250,6 +286,15 @@ void canRequestDetail() {      // get 0x018F (детальна аварійна 
   canSend(ID_GET_REQ, d);
 }
 
+// Handshake до кожного можливого модуля (серійник / тип плати / слот).
+// Шлемо broadcast (addr 0) + поадресно 1..MAX_UNITS: broadcast може зачепити
+// модуль, що ще не має адреси, поадресні — вже зареєстрованих.
+void canRequestHandshake() {
+  uint8_t d[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  canSend(idHandshake(0), d);
+  for (uint8_t a = 1; a <= MAX_UNITS; a++) canSend(idHandshake(a), d);
+}
+
 // Запис дефолтних (offline/енергонезалежних) значень у самі модулі — у їхній ROM.
 // Діють, коли модуль стартує без контролера (standalone).
 void writePsuDefaults() {
@@ -271,9 +316,35 @@ void resendSetpoints() {   // тримаємо online-значення "живи
 void canPoll() {
   twai_message_t m;
   while (twai_receive(&m, 0) == ESP_OK) {
+    traceAdd(m.identifier, m.data_length_code, m.data, 0);   // усі кадри в debug-буфер (вкл. негоціацію адрес)
+    // Переузгодження адрес (кадри 30 01/30 02): усім модулям потрібне вікно
+    // тиші ~5 с, щоб обмінятися серійниками й пересортуватись. Контролер
+    // замовкає на CAN_NEG_QUIET_MS, інакше другий модуль не встигає доєднатись.
+    if (m.data_length_code >= 2 && m.data[0] == 0x30 && (m.data[1] == 0x01 || m.data[1] == 0x02)) {
+      if (millis() >= canQuietUntil)
+        Serial.println(TR("[CAN] переузгодження адрес — пауза обміну", "[CAN] address renegotiation — pausing bus"));
+      unsigned long until = millis() + CAN_NEG_QUIET_MS;
+      if (until > canQuietUntil) canQuietUntil = until;
+      continue;
+    }
     if (!m.extd || m.data_length_code != 8) continue;
     if (idProto(m.identifier) != 0x21) continue;
     uint8_t cmd = idCmd(m.identifier);
+    // Handshake-відповідь (cmd 0x50): серійник / тип плати / слот
+    if (cmd == 0x50) {
+      uint8_t a = idAddr(m.identifier);
+      if (a < 1 || a > MAX_UNITS || m.data[0] != 0x00) continue;
+      Unit &uh = u[a];
+      uh.lastRx = millis(); uh.hs = true;
+      switch (m.data[1]) {
+        case 0x02: snprintf(uh.serial, sizeof(uh.serial), "%02X%02X%02X%02X%02X%02X",
+                            m.data[2],m.data[3],m.data[4],m.data[5],m.data[6],m.data[7]); break;
+        case 0x03: for (int k=0;k<6;k++){ uint8_t c=m.data[2+k]; uh.model[k]=(c>=32&&c<127)?c:'.'; } break;
+        case 0x04: for (int k=0;k<6;k++){ uint8_t c=m.data[2+k]; uh.model[6+k]=(c>=32&&c<127)?c:'.'; } uh.model[12]=0; break;
+        case 0x06: uh.slot = m.data[2]; break;
+      }
+      continue;
+    }
     if (cmd != 0x40 && cmd != 0x82) continue;         // лише data/get відповіді
     uint8_t addr = idAddr(m.identifier);
     if (addr < 1 || addr > MAX_UNITS || m.data[0] != 0x01) continue;
@@ -411,6 +482,9 @@ void buildStatusJson(char* buf, size_t n) {
     o["acf"]=u[i].acFail; o["ot"]=u[i].overTemp; o["alm"]=u[i].alarm;
     o["b2"]=u[i].alarmBit2;
     if (u[i].reg8F[0]) o["r8f"]=u[i].reg8F;
+    if (u[i].serial[0]) o["sn"]=u[i].serial;
+    if (u[i].model[0])  o["mdl"]=u[i].model;
+    if (u[i].hs)        o["slot"]=u[i].slot;
   }
   bool psuAlarm = false;
   for (int i = 1; i <= MAX_UNITS; i++)
@@ -423,6 +497,7 @@ void buildStatusJson(char* buf, size_t n) {
   JsonObject dg = doc["diag"].to<JsonObject>();
   dg["can"]=canStateStr; dg["txe"]=canTxErrCnt; dg["rxe"]=canRxErrCnt;
   dg["txf"]=canTxFail; dg["boff"]=canBusOff;
+  dg["quiet"]=(millis() < canQuietUntil) ? (int)((canQuietUntil - millis())/1000UL + 1) : 0;  // тихий старт, с
   if (lastErr[0]) { dg["err"]=lastErr; dg["errAge"]=(millis()-lastErrMs)/1000UL; }
   serializeJson(doc, buf, n);
 }
@@ -442,6 +517,9 @@ void handleCommand(const char* json) {
   else if (!strcmp(cmd, "def_v"))    { psuDefV = constrain(val, VOLT_MIN, VOLT_MAX); psuDefSave(); }
   else if (!strcmp(cmd, "def_a"))    { psuDefA = constrain(val, 0.0f, CURR_MAX);   psuDefSave(); }
   else if (!strcmp(cmd, "def_write")){ writePsuDefaults(); }
+  else if (!strcmp(cmd, "trace"))      { traceOn = (val != 0); return; }          // підписка на trace-пуші
+  else if (!strcmp(cmd, "trace_clear")){ traceClear(); return; }                  // очистити й записати знову
+  else if (!strcmp(cmd, "trace_roll")) { traceRolling = (val != 0); if (traceRolling) traceFrozen = false; return; }
   mqttPublishState();
 }
 
@@ -453,6 +531,32 @@ void pushStatus() {
   if (ws.count() == 0) return;
   char buf[1536];
   buildStatusJson(buf, sizeof(buf));
+  ws.textAll(buf);
+}
+
+// CAN trace -> окреме WS-повідомлення (ключ "tr"), щоб не роздувати статус-JSON
+void buildTraceJson(char* buf, size_t n) {
+  JsonDocument doc;
+  JsonObject tr = doc["tr"].to<JsonObject>();
+  tr["froz"] = traceFrozen; tr["roll"] = traceRolling; tr["len"] = traceCount;
+  tr["now"]  = (uint32_t)millis();
+  tr["quiet"]= (millis() < canQuietUntil) ? (int)((canQuietUntil - millis())/1000UL + 1) : 0;
+  JsonArray a = tr["f"].to<JsonArray>();
+  int start = (traceCount < TRACE_LEN) ? 0 : traceHead;   // найстаріший кадр
+  for (int k = 0; k < traceCount; k++) {
+    Frame &fr = traceBuf[(start + k) % TRACE_LEN];
+    JsonObject o = a.add<JsonObject>();
+    o["t"] = fr.ms; o["x"] = fr.dir; o["dl"] = fr.dlc;
+    char ids[9]; snprintf(ids, sizeof(ids), "%08lX", (unsigned long)fr.id); o["id"] = ids;
+    char ds[17]; for (int j = 0; j < 8; j++) snprintf(ds + j*2, 3, "%02X", fr.d[j]); o["d"] = ds;
+  }
+  serializeJson(doc, buf, n);
+}
+
+void pushTrace() {
+  if (!traceOn || ws.count() == 0) return;
+  static char buf[4096];
+  buildTraceJson(buf, sizeof(buf));
   ws.textAll(buf);
 }
 
@@ -769,9 +873,10 @@ void oledDraw() {
     if (unitPresent(i) && u[i].acFail)   { fu = i; ft = "AC-FAIL";  break; }
     if (unitPresent(i) && u[i].overTemp) { fu = i; ft = "OVERTEMP"; break; }
   }
-  if (ft)          oled.printf("! U%d %s", fu, ft);
-  else if (apMode) oled.print("WiFi AP 192.168.4.1");
-  else             oled.printf("set %.1f V / %.0f A", spVoltage, spCurrent);
+  if (ft)                        oled.printf("! U%d %s", fu, ft);
+  else if (millis() < canQuietUntil) oled.printf("CAN start %lus", (canQuietUntil - millis())/1000UL + 1);
+  else if (apMode)               oled.print("WiFi AP 192.168.4.1");
+  else                           oled.printf("set %.1f V / %.0f A", spVoltage, spCurrent);
   // індикація натискання апаратної кнопки — смужка внизу екрана (~250 мс)
   if (millis() - oledFlash < 250) oled.fillRect(0, 62, OLED_WIDTH, 2, SSD1306_WHITE);
   oled.display();
@@ -1106,6 +1211,9 @@ void setup() {
   spLoad();              // відновити збережені напругу/струм/вихід з NVS
 
   twaiInit();
+  canQuietUntil = millis() + CAN_QUIET_START_MS;   // тихий старт: даємо модулям розподілити адреси
+  if (CAN_QUIET_START_MS)
+    Serial.printf(TR("[CAN] тихий старт %lu мс\n", "[CAN] quiet start %lu ms\n"), (unsigned long)CAN_QUIET_START_MS);
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
@@ -1140,6 +1248,9 @@ void loop() {
   canPoll();
   computeAgg();
 
+  // тихе вікно минуло -> застосувати робочі setpoint-и (перший раз після старту)
+  if (!canStarted && millis() >= canQuietUntil) { canStarted = true; resendSetpoints(); }
+
   // При зміні кількості онлайн-модулів перерахувати ліміт струму на модуль
   static int prevUnits = -1;
   if (ag.count != prevUnits) { prevUnits = ag.count; if (ag.count > 0) applyCurrent(spCurrent); }
@@ -1154,13 +1265,14 @@ void loop() {
   if (otaReady) ArduinoOTA.handle();
 
   unsigned long now = millis();
-  static unsigned long tReq = 0, tPush = 0, tResend = 0, tOled = 0, tDiag = 0;
+  static unsigned long tReq = 0, tPush = 0, tResend = 0, tOled = 0, tDiag = 0, tTrace = 0;
 
-  if (now - tReq    >= 2000) { tReq    = now; canRequestData(); canRequestFanStatus(); if (anyDetailNeeded()) canRequestDetail(); }
+  if (now - tReq    >= 2000) { tReq    = now; canRequestData(); canRequestFanStatus(); canRequestHandshake(); if (anyDetailNeeded()) canRequestDetail(); }
   if (now - tPush   >= 1500) { tPush   = now; pushStatus(); mqttPublishState(); }
   if (now - tResend >= 10000){ tResend = now; resendSetpoints(); }
   if (now - tOled   >= 250)  { tOled   = now; oledDraw(); }
   if (now - tDiag   >= 1000) { tDiag   = now; diagTick(); }
+  if (now - tTrace  >= 500)  { tTrace  = now; pushTrace(); }
 
   if (spDirty && now - spDirtyAt > 1500) { spDirty = false; spSave(); }  // відкладене збереження в NVS
 

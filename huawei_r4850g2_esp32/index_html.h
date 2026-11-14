@@ -52,6 +52,9 @@ details.card[open] summary{margin-bottom:6px}
 .dan{background:transparent;border-color:#5a2a2a;color:#ff8a80}
 .net{display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
 .net:last-child{border-bottom:none}.net:hover{color:var(--acc)}
+.trace{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:320px;overflow:auto;background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:8px 10px;white-space:pre;margin-top:10px}
+.trace .rx{color:var(--acc)}.trace .tx{color:var(--warn)}.trace .neg{color:var(--ok)}
+.trace .em{color:var(--mut)}
 @media(max-width:640px){.tiles{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <header>
@@ -173,6 +176,18 @@ details.card[open] summary{margin-bottom:6px}
   <div class="foot" id="diagLine" style="margin-top:6px">CAN: –</div>
 </div>
 
+<details class="card" id="dbgCard">
+  <summary data-i="h_dbg">Діагностика CAN (trace)</summary>
+  <div class="foot" data-i="dbg_note" style="margin:6px 0 10px">Кадри шини в реальному часі. За замовчуванням — знімок перших кадрів після старту (негоціація адрес модулів). «Записати знову» очищає й ловить новий знімок; «Рухомий» показує останні кадри безперервно.</div>
+  <div class="row">
+    <button id="trClrBtn" data-i="dbg_clear" onclick="traceClear()">Записати знову</button>
+    <button id="trRollBtn" data-i="dbg_roll" onclick="traceRoll()">Рухомий</button>
+    <span id="trStat" class="foot"></span>
+  </div>
+  <div id="trace" class="trace em" data-i="dbg_empty">—</div>
+  <div class="foot" style="margin-top:8px"><span class="rx" style="font-family:monospace">rx</span> <span data-i="dbg_rx">— від модулів</span> · <span class="tx" style="font-family:monospace">tx</span> <span data-i="dbg_tx">— від контролера</span> · <span class="neg" style="font-family:monospace">neg</span> <span data-i="dbg_neg">— негоціація адрес</span>. <span data-i="dbg_cols">Колонки: Δмс, напрям, CAN ID, addr/cmd, дані.</span></div>
+</details>
+
 </main>
 <div id="toast"></div>
 
@@ -187,6 +202,7 @@ const I18N={
   reapply:'перезастосовується автоматично',wifi_link:'Налаштування Wi-Fi',rpm:'об/хв',hz:'Гц',vin:'вх',vout:'вих',
   outOn:'УВІМКНЕНО — натисни, щоб вимкнути',outOff:'ВИМКНЕНО — натисни, щоб увімкнути',
   mOff:'вимкнено',mOn:'онлайн',mBad:'офлайн',tries:'спроб',
+  h_dbg:'Діагностика CAN (trace)',dbg_note:'Кадри шини в реальному часі. За замовчуванням — знімок перших кадрів після старту (негоціація адрес модулів). «Записати знову» очищає й ловить новий знімок; «Рухомий» показує останні кадри безперервно.',dbg_clear:'Записати знову',dbg_roll:'Рухомий',dbg_roll_on:'Рухомий ✓',dbg_empty:'—',dbg_cols:'Колонки: Δмс, напрям, CAN ID, addr/cmd, дані.',dbg_frozen:'знімок зафіксовано',dbg_rec:'запис…',dbg_rolling:'рухомий',dbg_quiet:'тихий старт',dbg_frames:'кадрів',dbg_wait:'очікування кадрів…',dbg_rx:'— від модулів',dbg_tx:'— від контролера',dbg_neg:'— негоціація адрес',m_slot:'слот',
   e_n4:'timeout',e_n3:'з\'єднання втрачено',e_n2:'TCP не вдався (IP/порт)',e_n1:'вимкнено',e_1:'протокол',e_2:'client id',e_3:'недоступний',e_4:'логін/пароль',e_5:'ACL'},
  en:{online:'online',offline:'offline',h_status:'Status',l_outV:'Output voltage',l_outA:'Output current',l_outW:'Output power',l_inV:'Input voltage',l_inW:'Input power',l_eff:'Efficiency',l_tOut:'Output temp.',l_tIn:'Input temp.',l_units:'Modules online',
   u_V:'V',u_A:'A',u_W:'W',h_units:'Modules',h_volt:'Voltage',h_curr:'Current limit (total, all modules)',set:'Apply',h_out:'Output',h_fan:'Fan',
@@ -197,6 +213,7 @@ const I18N={
   reapply:'re-applied automatically',wifi_link:'Wi-Fi settings',rpm:'rpm',hz:'Hz',vin:'in',vout:'out',
   outOn:'ON — tap to turn off',outOff:'OFF — tap to turn on',
   mOff:'disabled',mOn:'online',mBad:'offline',tries:'tries',
+  h_dbg:'CAN diagnostics (trace)',dbg_note:'Live bus frames. By default a snapshot of the first frames after boot (module address negotiation). “Record again” clears and captures a fresh snapshot; “Rolling” shows the latest frames continuously.',dbg_clear:'Record again',dbg_roll:'Rolling',dbg_roll_on:'Rolling ✓',dbg_empty:'—',dbg_cols:'Columns: Δms, dir, CAN ID, addr/cmd, data.',dbg_frozen:'snapshot frozen',dbg_rec:'recording…',dbg_rolling:'rolling',dbg_quiet:'quiet start',dbg_frames:'frames',dbg_wait:'waiting for frames…',dbg_rx:'— from modules',dbg_tx:'— from controller',dbg_neg:'— address negotiation',m_slot:'slot',
   e_n4:'timeout',e_n3:'connection lost',e_n2:'TCP failed (IP/port)',e_n1:'disabled',e_1:'protocol',e_2:'client id',e_3:'unavailable',e_4:'login/password',e_5:'ACL'}
 };
 let lang='uk', last=null, connOn=false;
@@ -218,9 +235,9 @@ let toastT;
 function toast(msg,ok){var el=document.getElementById('toast');if(!el)return;el.textContent=msg;el.className='show '+(ok?'ok':'bad');clearTimeout(toastT);toastT=setTimeout(function(){el.className=''},1600);}
 function connect(){
   ws=new WebSocket('ws://'+location.host+'/ws');
-  ws.onopen =()=>setConn(true);
+  ws.onopen =()=>{ setConn(true); var dc=document.getElementById('dbgCard'); if(dc&&dc.open) tsend('trace',1); };
   ws.onclose=()=>{setConn(false);setTimeout(connect,1500)};
-  ws.onmessage=e=>update(JSON.parse(e.data));
+  ws.onmessage=e=>{ const m=JSON.parse(e.data); if(m.tr) renderTrace(m.tr); else update(m); };
 }
 function setConn(o){connOn=o;var p=document.getElementById('conn');p.className='pill '+(o?'ok':'bad');document.getElementById('connTxt').textContent=o?t('online'):t('offline');}
 function send(cmd,value){ if(ws&&ws.readyState==1){ ws.send(JSON.stringify({cmd,value})); toast(t('sent'),true); } else toast(t('nolink'),false); }
@@ -260,7 +277,9 @@ function update(s){
       const alm = x.alm ? ' · alm '+(x.alm>>>0).toString(16) : '';
       const fl = (x.acf?' ⚠AC':'')+(x.ot?' ⚠HOT':'')+(x.b2?' ⚠BIT2'+(x.r8f?' 0x18F:'+x.r8f:''):'');
       const base = '#'+x.i+':  '+t('vin')+' '+f(x.vin)+' '+t('u_V')+' '+f(x.hz)+' '+t('hz')+'  →  '+t('vout')+' '+f(x.v)+' '+t('u_V')+' / '+f(x.a)+' '+t('u_A')+' · '+f(x.t,0)+' °C · '+f(x.rpm,0)+' '+t('rpm')+alm;
-      return '<div class="u">'+base + (fl ? ' <b style="color:var(--bad)">'+fl+'</b>' : '')+'</div>';
+      const idp=[]; if(x.mdl)idp.push(x.mdl.trim()); if(x.sn)idp.push('SN '+x.sn); if(x.slot!=null)idp.push(t('m_slot')+' '+x.slot);
+      const idl = idp.length ? '<div class="foot" style="margin:2px 0 0;font-family:monospace">'+idp.join(' · ')+'</div>' : '';
+      return '<div class="u">'+base + (fl ? ' <b style="color:var(--bad)">'+fl+'</b>' : '')+idl+'</div>';
     }).join('');
   } else uSec.style.display='none';
   outState = !!s.output;
@@ -283,6 +302,7 @@ function update(s){
   let dl = 'CAN: '+(d.can||'?')+' · tx-err '+(d.txe||0)+' · rx-err '+(d.rxe||0);
   if(d.txf) dl += ' · tx-fail '+d.txf;
   if(d.boff) dl += ' · bus-off '+d.boff;
+  if(d.quiet>0) dl += ' · '+t('dbg_quiet')+' '+d.quiet+'s';
   if(d.err) dl += '  ⚠ '+d.err+' ('+d.errAge+'s)';
   diagLine.textContent = dl;
   diagLine.style.color = d.err ? 'var(--bad)' : '';
@@ -329,6 +349,38 @@ function mqttSave(){
     .then(r=>r.json()).then(j=>toast(j.ok?t('m_saved'):t('w_err_'+(j.err||'net')),!!j.ok)).catch(()=>toast(t('w_err_net'),false));
 }
 document.getElementById('setCard').addEventListener('toggle',function(){ if(this.open && !this._loaded){ this._loaded=1; wscan(); } });
+// --- Debug / CAN trace ---
+let traceRolling=false;
+function tsend(cmd,value){ if(ws&&ws.readyState==1) ws.send(JSON.stringify({cmd,value})); }
+function fmtFrame(fr,prev){
+  const id=(parseInt(fr.id,16)>>>0);
+  const proto=(id>>>23)&0x3f, addr=(id>>>16)&0x7f, cmd=(id>>>8)&0xff;
+  const dt=(prev==null?0:(fr.t-prev));
+  const neg=proto!==0x21;
+  const dl=(fr.dl!=null?fr.dl:8);
+  const data=fr.d.replace(/(..)/g,'$1 ').trim().split(' ').slice(0,dl).join(' ');
+  const tag=neg?'neg':(fr.x?'tx':'rx');
+  const ac=neg?'  neg  ':('a'+addr+' c'+cmd.toString(16).toUpperCase().padStart(2,'0'));
+  const head=((dt>9999?'9999+':dt+'')+'ms').padStart(7)+' '+(fr.x?'tx':'rx');
+  return '<span class="'+tag+'">'+head+'</span>  '+fr.id+'  '+ac+'  '+data;
+}
+function renderTrace(tr){
+  traceRolling=!!tr.roll;
+  const el=document.getElementById('trace'), st=document.getElementById('trStat');
+  const rb=document.getElementById('trRollBtn');
+  const parts=[tr.len+' '+t('dbg_frames'), tr.roll?t('dbg_rolling'):(tr.froz?t('dbg_frozen'):t('dbg_rec'))];
+  if(tr.quiet>0) parts.push(t('dbg_quiet')+' '+tr.quiet+'s');
+  st.textContent=parts.join(' · ');
+  rb.textContent=tr.roll?t('dbg_roll_on'):t('dbg_roll'); rb.className=tr.roll?'pri':'';
+  if(!tr.f||!tr.f.length){ el.className='trace em'; el.textContent=t('dbg_wait'); return; }
+  el.className='trace';
+  let prev=null; const rows=tr.f.map(fr=>{const r=fmtFrame(fr,prev);prev=fr.t;return r;});
+  el.innerHTML=rows.join('\n');
+  el.scrollTop=traceRolling?el.scrollHeight:0;
+}
+function traceClear(){ tsend('trace_clear',1); const el=document.getElementById('trace'); el.className='trace em'; el.textContent=t('dbg_wait'); }
+function traceRoll(){ traceRolling=!traceRolling; tsend('trace_roll',traceRolling?1:0); }
+document.getElementById('dbgCard').addEventListener('toggle',function(){ tsend('trace',this.open?1:0); if(this.open){ const el=document.getElementById('trace'); if(el.classList.contains('em')) el.textContent=t('dbg_wait'); } });
 document.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;b.classList.remove('flash');void b.offsetWidth;b.classList.add('flash');setTimeout(function(){b.classList.remove('flash')},350);});
 applyLang();
 connect();

@@ -137,6 +137,20 @@ HTTP-маршрути: `/` (дашборд або, в AP, сторінка на�
 
 `tools/gen_preview.py` витягує HTML з `index_html.h`/`wifi_html.h` і додає мок-дані (фейкові WebSocket/fetch), генеруючи `preview/index.html` та `preview/wifi.html` — їх можна відкрити у браузері без прошивки. Запускається автоматично перед кожним `pio run` (pre-скрипт) або вручну: `python tools/gen_preview.py`.
 
+### Діагностика (кілька модулів)
+
+Контролер допомагає модулям коректно розподілити CAN-адреси:
+
+- **Тихий старт** (`CAN_QUIET_START_MS`, 10 с): після ввімкнення ESP не передає в шину, щоб модулі встигли домовитися про адреси за серійниками на тихій шині.
+- **Пауза на переузгодженні** (`CAN_NEG_QUIET_MS`, 6 с): побачивши кадри `30 01/30 02`, контролер замовкає й дає модулям чисте вікно для пересортування. Без цього при гарячому доєднанні другий модуль часто не встигає взяти адресу (видно лише перший).
+- **Handshake** (`0x108N50FE`): зчитує серійник, тип плати і слот кожного модуля — у картці «Модулі» видно `тип · SN · слот`.
+- **Debug-секція «Діагностика CAN (trace)»** у дашборді показує кадри шини в реальному часі (RX+TX, разом із негоціацією), зі знімком старту та рухомим режимом — зручно дивитися, чи обидва серійники зʼявляються на шині й чи є слово аварій.
+
+Нотатки щодо заліза:
+- Модуль **не дасть вихід**, доки **обидва піни slot-detect не замкнені на `DC−`** — це головна граблька при стендовому тесті (CAN живий, ON приймає, а виходу нема й горить захист). 
+- Модулі **різних поколінь на одній шині можуть не узгодити адреси** (перевірено: R4850G5 не домовляється з R4850G2). Однакові покоління працюють у паралель; змішані — тримати на окремих CAN-шинах (по контролеру на шину), виходи паралельно.
+- Слово аварій модуля — регістр `0x83`; якщо стоїть bit2, деталізація в `0x018F` (на дашборді поле `r8f`).
+
 ### Увага
 
 Ви працюєте з потужним джерелом живлення (до 3 кВт на модуль) та мережевою напругою. Перед підключенням до батареї перевірте напругу й струм, межі в `config.h` і стан BMS. Автор не несе відповідальності за пошкодження обладнання чи батарей.
@@ -280,6 +294,20 @@ Home Assistant entities appear automatically (device "Huawei R4850G2"):
 ### Web UI preview
 
 `tools/gen_preview.py` extracts the HTML from `index_html.h`/`wifi_html.h` and injects mock data (fake WebSocket/fetch), producing `preview/index.html` and `preview/wifi.html` — openable in a browser without flashing. It runs automatically before every `pio run` (pre-script) or manually: `python tools/gen_preview.py`.
+
+### Diagnostics (multiple modules)
+
+The controller helps the modules assign CAN addresses cleanly:
+
+- **Quiet start** (`CAN_QUIET_START_MS`, 10 s): after power-on the ESP stays silent so the modules can agree on addresses (by serial number) on a quiet bus.
+- **Renegotiation pause** (`CAN_NEG_QUIET_MS`, 6 s): on seeing `30 01/30 02` frames the controller mutes itself, giving the modules a clean window to re-sort. Without it the second module often fails to claim an address on hot-join (only the first is seen).
+- **Handshake** (`0x108N50FE`): reads each module's serial, board type and slot — shown as `type · SN · slot` in the Modules card.
+- **"CAN diagnostics (trace)" debug section** in the dashboard shows live bus frames (RX+TX, negotiation included), with a boot snapshot and a rolling mode — handy to check whether both serials appear on the bus and read the alarm word.
+
+Hardware notes:
+- A module **will not output** until **both slot-detect pins are tied to `DC−`** — the main gotcha on the bench (CAN alive, ON accepted, but no output and the protection LED on).
+- Modules of **different generations may fail to negotiate addresses on one bus** (confirmed: an R4850G5 will not negotiate with an R4850G2). Same-generation modules parallel fine; keep mixed ones on separate CAN buses (one controller per bus), outputs paralleled.
+- The module alarm word is register `0x83`; if bit 2 is set, the detail is in `0x018F` (dashboard field `r8f`).
 
 ### Warning
 

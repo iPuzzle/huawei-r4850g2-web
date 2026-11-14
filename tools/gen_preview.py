@@ -40,7 +40,8 @@ SHIM = '''<!-- ===== PREVIEW SHIM (згенеровано автоматично
   function base(){
     var mods=[1,2,3].map(function(i){
       return {i:i, vin:230+rnd(2), hz:50+rnd(0.05), v:55.9+rnd(0.05), a:9+Math.random()*1.2,
-              t:42+Math.random()*3, rpm:4200+Math.random()*300, alm:0, acf:false, ot:false, b2:false, r8f:''};
+              t:42+Math.random()*3, rpm:4200+Math.random()*300, alm:0, acf:false, ot:false, b2:false, r8f:'',
+              sn:['686875042029','70688530A1A6','2C682408351B'][i-1]||'', mdl:['R4850G2','R4850G5','R4830G2'][i-1]||'', slot:i};
     });
     return {
       outV:55.9+rnd(0.05), outA:28+rnd(1), outW:1560+rnd(40), inV:230+rnd(1.5), inW:1700+rnd(40), eff:96+Math.random(),
@@ -67,7 +68,25 @@ SHIM = '''<!-- ===== PREVIEW SHIM (згенеровано автоматично
   var listeners=[];
   function push(){ var d=JSON.stringify(sample());
     listeners.forEach(function(ws){ if(ws.onmessage) ws.onmessage({data:d}); }); }
-  function applyCmd(c){ /* за бажання: відобразити команди в мок-стані */ }
+  // --- мок CAN-trace для debug-секції ---
+  var trSub=false, trFroz=true, trRoll=false;
+  var trFrames=[
+    {t:1203,x:0,dl:8,id:'10070100',d:'3001A1B2C3D40000'},
+    {t:1251,x:0,dl:8,id:'10070200',d:'3002E5F607080000'},
+    {t:1298,x:0,dl:8,id:'10078100',d:'3081000102030405'},
+    {t:5010,x:1,dl:8,id:'108040FE',d:'0000000000000000'},
+    {t:5013,x:0,dl:8,id:'1081407F',d:'017500000DF80000'},
+    {t:5015,x:0,dl:8,id:'1082407F',d:'017500000DF80000'},
+    {t:5018,x:0,dl:8,id:'1083407F',d:'0183000000000004'}
+  ];
+  function pushTrace(){ if(!trSub) return;
+    var tr={froz:trFroz,roll:trRoll,len:trFrames.length,now:6000,quiet:0,f:trFrames};
+    listeners.forEach(function(ws){ if(ws.onmessage) ws.onmessage({data:JSON.stringify({tr:tr})}); }); }
+  function applyCmd(c){ if(!c) return;
+    if(c.cmd==='trace'){ trSub=!!c.value; if(trSub) pushTrace(); }
+    else if(c.cmd==='trace_clear'){ trFroz=false; pushTrace(); setTimeout(function(){trFroz=true;pushTrace();},400); }
+    else if(c.cmd==='trace_roll'){ trRoll=!!c.value; pushTrace(); }
+  }
   function MockWS(url){ this.url=url; this.readyState=0; var self=this;
     setTimeout(function(){ self.readyState=1; if(self.onopen) self.onopen(); listeners.push(self);
       if(self.onmessage) self.onmessage({data:JSON.stringify(sample())}); }, 120); }
@@ -84,6 +103,7 @@ SHIM = '''<!-- ===== PREVIEW SHIM (згенеровано автоматично
     return _of?_of.apply(this,arguments):R({});
   };
   setInterval(push, 1500);
+  setInterval(pushTrace, 1000);
   function mk(){ var bar=document.getElementById('__pv'); if(!bar) return;
     scn.forEach(function(p){ var b=document.createElement('button'); b.textContent=p[1];
       if(p[0]===scenario) b.className='on';

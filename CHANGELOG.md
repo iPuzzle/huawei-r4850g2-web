@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-14
+
+### Додано
+- **Тихий старт CAN** (`CAN_QUIET_START_MS`, за замовч. 10 с): після ввімкнення контролер не передає в шину, щоб модулі встигли самі розподілити адреси за серійниками.
+- **Пауза на переузгодженні адрес** (`CAN_NEG_QUIET_MS`, за замовч. 6 с): щойно на шині зʼявляються кадри `30 01/30 02`, контролер замовкає, даючи модулям чисте вікно для пересортування — лікує «видно лише перший модуль» при гарячому доєднанні.
+- **Handshake-запит** (`0x108N50FE`): зчитування серійника (рег. `0x02`), типу плати (`0x03/0x04`) і слота (`0x06`) кожного модуля; показ `тип · SN · слот` у картці «Модулі».
+- **Debug-секція «Діагностика CAN (trace)»** у дашборді: кільцевий буфер кадрів шини (RX+TX, разом із негоціацією) з підсвіткою rx/tx/neg, режимами «знімок старту» і «Рухомий»; корисно для розбору адресації та аварій.
+
+### Виправлено
+- Багатомодульна адресація: кілька **сумісних** модулів тепер стабільно піднімаються в паралель (G5 з G2 на одній шині не узгоджуються — тримати на окремих шинах).
+
 ## [0.2.0] — 2026-11-11
 
 ### Додано
@@ -45,6 +56,10 @@
 ---
 
 ## English summary
+
+### [0.3.0] — 2026-11-14
+- **Added:** CAN quiet start (`CAN_QUIET_START_MS`) so modules self-assign addresses on a silent bus; renegotiation pause (`CAN_NEG_QUIET_MS`) that mutes the controller on `30 01/30 02` frames — fixes "only the first module is seen" on hot-join; handshake query (`0x108N50FE`) reading each module's serial/board-type/slot, shown as `type · SN · slot` in the Modules card; a "CAN diagnostics (trace)" debug section (ring buffer of bus frames, rx/tx/neg colouring, boot-snapshot and rolling modes).
+- **Fixed:** several **compatible** modules now come up reliably in parallel (a G5 and a G2 do not negotiate together on one bus — keep them on separate buses).
 
 ### [0.2.0] — 2026-11-11
 - **Added:** password login (Basic Auth; open in AP mode; `admin`/`admin`, changeable from the dashboard); firmware update over browser (`/update`) and network (ArduinoOTA); MQTT live-save without reboot (`/api/mqtt`); inline Wi-Fi setup in the dashboard; module default values written to offline registers (`def_v`/`def_a`/`def_write`); setpoint persistence in NVS (survives full power loss); button-press feedback; browser preview tooling (`tools/gen_preview.py`); a separate "Connection status" card.
